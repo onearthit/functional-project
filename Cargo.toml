@@ -29,10 +29,10 @@ anyhow = "1.0.95"
 embedded-svc = "0.28.1"
 dotenv = "0.15.0"
 esp-idf-hal = "0.45.2"
+toml-cfg = "0.2.0"
+accumfft = { git = "https://github.com/onearthit/accumfft.git", version = "0.1.0" }
 
 [build-dependencies]
+toml-cfg = "0.2.0"
 embuild = "0.33"
 
-[env]
-WIFI_SSID = "your-wifi-ssid-here"
-WIFI_PASS = "your-wifi-pwd-here"
