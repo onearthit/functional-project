@@ -30,7 +30,7 @@ embedded-svc = "0.28.1"
 dotenv = "0.15.0"
 esp-idf-hal = "0.45.2"
 toml-cfg = "0.2.0"
-accumfft = { git = "https://github.com/onearthit/accumfft.git", version = "0.1.0" }
+accumfft = { git = "https://github.com/onearthit/accumfft.git" }
 
 [build-dependencies]
 toml-cfg = "0.2.0"
