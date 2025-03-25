@@ -1,0 +1,5 @@
+[hello-world]
+wifi_ssid = 
+wifi_psk = 
+mqtt_url =
+mqtt_topic = 
