@@ -1,21 +1,45 @@
 use core::convert::TryInto;
 
+use accumfft::sma::SMA;
+use accumfft::accumfft::AccumFFT;
+
+
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 
+
+use esp_idf_hal::adc::{ AdcContDriver, AdcMeasurement, Attenuated};
+use esp_idf_svc::hal::adc::AdcContConfig;
 use esp_idf_svc::hal::prelude::Peripherals;
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::mqtt::client::{EspMqttClient, EventPayload, MqttClientConfiguration, QoS};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi, WifiEvent};
 use esp_idf_svc::{eventloop::EspSystemEventLoop, nvs::EspDefaultNvsPartition};
+use esp_idf_hal::reset::restart;
 
 use log::info;
 
-const SSID: &str = env!("WIFI_SSID");
-const PASSWORD: &str = env!("WIFI_PASS");
+#[toml_cfg::toml_config]
+pub struct Config {
+    #[default("")]
+    wifi_ssid: &'static str,
+    #[default("")]
+    wifi_psk: &'static str,
+    #[default("")]
+    mqtt_url: &'static str,
+    #[default("")]
+    mqtt_topic: &'static str
+}
 
-fn init_wifi() -> anyhow::Result<BlockingWifi<EspWifi<'static>>> {
-    info!("Connecting to Wi-Fi: {}, password: {}", SSID, PASSWORD);
+fn main() -> anyhow::Result<()> {
+    esp_idf_svc::sys::link_patches();
+    EspLogger::initialize_default();
 
     let peripherals = Peripherals::take()?;
+    let app_config = CONFIG;
+    let mut accum = AccumFFT::new(50.0);
+    let mut sma = SMA::new(0.05);
+
+    info!("Connecting to Wi-Fi: {}, password: {}", app_config.wifi_ssid, app_config.wifi_psk);
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
@@ -30,37 +54,64 @@ fn init_wifi() -> anyhow::Result<BlockingWifi<EspWifi<'static>>> {
         EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
         sys_loop,
     )?;
-    connect_wifi(&mut wifi)?;
+
+    if let Err(e) = connect_wifi(&app_config, &mut wifi) {
+        info!("Failed to connect to Wi-Fi: {:?}", e);
+        restart();
+    }
+
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     info!("Wifi DHCP info: {:?}", ip_info);
-    Ok(wifi)
-}
 
-fn main() -> anyhow::Result<()> {
-    esp_idf_svc::sys::link_patches();
-    EspLogger::initialize_default();
-
-    let wifi = match init_wifi() {
-        Ok(wifi) => Some(wifi),
+    let mut mqtt = match init_mqtt(&app_config) {
+        Ok(mqtt) => mqtt,
         Err(err) => {
-            info!("WiFi Error: {:?}", err);
-            None
+            info!("MQTT Error: {:?}", err);
+            return Err(err);
         }
     };
 
+    let mut adc = AdcContDriver::new(
+        peripherals.adc1,
+        peripherals.i2s0,
+        &AdcContConfig::default(),
+        Attenuated::db11(peripherals.pins.gpio36),
+    )?;
+
+    adc.start()?;
+    let mut samples = [AdcMeasurement::default(); 100];
     loop {
-        let ip_info = wifi.as_ref().unwrap().wifi().sta_netif().get_ip_info()?;
-        info!("Wifi DHCP info: {:?}", ip_info);
-        std::thread::sleep(core::time::Duration::from_secs(1));
+        if let Ok(num_read) = adc.read(&mut samples, 100) {
+            for index in 0..num_read {
+                accum.feed(samples[index].data() as f32);
+            }
+            if let Some(amplitude) = accum.amplitude() {
+                sma.feed(amplitude);
+                let smoothed_amplitude = sma.value();
+                if let Err(err) = mqtt.publish(
+                    app_config.mqtt_topic,
+                    QoS::AtLeastOnce,
+                    false,
+                    format!("{}", smoothed_amplitude).as_bytes(),
+                ) {
+                    info!("Failed to publish MQTT message: {:?}", err);
+                    restart();
+                }
+            } else {
+                info!("Amplitude is None, skipping MQTT publish");
+            }
+            accum.reset();
+        }
+        std::thread::sleep(core::time::Duration::from_millis(100));
     }
 }
 
-fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
+fn connect_wifi(app_config: &Config, wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
     wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: SSID.try_into().unwrap(),
+        ssid: app_config.wifi_ssid.try_into().unwrap(),
         bssid: None,
         auth_method: AuthMethod::WPA2Personal,
-        password: PASSWORD.try_into().unwrap(),
+        password: app_config.wifi_psk.try_into().unwrap(),
         channel: None,
         ..Default::default()
     }))?;
@@ -75,4 +126,36 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()>
     info!("Wifi netif up");
 
     Ok(())
+}
+
+
+fn init_mqtt(app_config: &Config) -> anyhow::Result<EspMqttClient<'static>> {
+    info!("Initializing MQTT client");
+    let mqtt_config = MqttClientConfiguration::default();
+
+    let client = EspMqttClient::new_cb(
+        format!("{}", app_config.mqtt_url).as_str(),
+        &mqtt_config,
+        move |msg| {
+            match msg.payload() {
+                EventPayload::BeforeConnect => {
+                    println!("Connecting to broker");
+                },
+                EventPayload::Received { id, topic, data, details } => {
+                    println!("Received message: id={}, topic={:?}, data={:?} , details={:?}", id, topic, data , details);
+                },
+                EventPayload::Connected(_) => {
+                    println!("Connected to broker");
+                },
+                EventPayload::Disconnected => {
+                    println!("Disconnected from broker");
+                    restart();
+                },
+                _ => {
+                    println!("Unhandle : {:?}", msg.payload());
+                }
+            }
+        }
+    )?;
+    Ok(client)
 }

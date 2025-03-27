@@ -14,7 +14,7 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 opt-level = "s"
 
 [profile.dev]
-debug = true    # Symbols are nice and they don't increase the size on Flash
+debug = false    # Symbols are nice and they don't increase the size on Flash
 opt-level = "z"
 
 [features]
@@ -27,10 +27,12 @@ log = "0.4"
 esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
 anyhow = "1.0.95"
 embedded-svc = "0.28.1"
+dotenv = "0.15.0"
+esp-idf-hal = "0.45.2"
+toml-cfg = "0.2.0"
+accumfft = { git = "https://github.com/onearthit/accumfft.git" }
 
 [build-dependencies]
+toml-cfg = "0.2.0"
 embuild = "0.33"
 
-[env]
-WIFI_SSID = "your-wifi-ssid-here"
-WIFI_PASS = "your-wifi-pwd-here"
